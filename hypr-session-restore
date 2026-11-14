@@ -9,12 +9,17 @@ daemon  - run `save` every SAVE_INTERVAL seconds as a safety net for
 State lives in $XDG_STATE_HOME/hypr-session-restore (override: $HYPR_SESSION_DIR).
 Disable restore entirely:  touch <state dir>/disabled
 Extra excluded classes:    HYPR_SESSION_EXCLUDE="class1,class2"
+Class-to-command mappings: ~/.config/hypr-session-restore/class-cmd.conf
+  One mapping per line: pattern = command-template
+  Example (Chrome PWAs):
+    chrome-(?P<domain>[^_]+)__-Profile_\\d+ = chromium --app=https://{domain}/
 
 Requires Hyprland >= 0.55 (Lua-era dispatcher syntax).
 """
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -26,6 +31,14 @@ STATE_DIR = os.environ.get("HYPR_SESSION_DIR") or os.path.join(
 )
 SESSION_FILE = os.path.join(STATE_DIR, "session.json")
 DISABLE_FLAG = os.path.join(STATE_DIR, "disabled")
+
+CONFIG_DIR = os.environ.get("HYPR_SESSION_CONFIG_DIR") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "hypr-session-restore",
+)
+CLASS_CMD_FILE = os.path.join(CONFIG_DIR, "class-cmd.conf")
+# Legacy location, kept for backward compatibility.
+CLASS_CMD_FILE_LEGACY = os.path.join(STATE_DIR, "class-cmd.conf")
 
 # Windows of these classes are never saved/restored. Add anything your
 # autostart already launches (bars, tray bridges, scratchpad daemons, ...)
@@ -48,6 +61,14 @@ TERMINALS = {
 }
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
+
+# Apps where every window belongs to a single process, but each invocation of
+# the command creates a new window in the same instance. For these classes we
+# relaunch once per saved window. Other single-instance apps are handled via
+# class-cmd.conf (spawn once per class).
+SPAWN_ALL_CLASSES = {
+    "com.mitchellh.ghostty",
+}
 
 SAVE_INTERVAL = 60
 DAEMON_INITIAL_DELAY = 90
@@ -118,8 +139,62 @@ def find_descendant(pid, names, max_depth=5):
 
 # ----------------------------------------------------------------------- save
 
+def load_class_cmd_patterns():
+    """Load user-defined class-to-command mappings from class-cmd.conf."""
+    patterns = []
+    path = CLASS_CMD_FILE
+    if not os.path.exists(path) and os.path.exists(CLASS_CMD_FILE_LEGACY):
+        path = CLASS_CMD_FILE_LEGACY
+    if not os.path.exists(path):
+        return patterns
+    with open(path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                print(
+                    f"hypr-session-restore: {path}:{line_no}: missing '='",
+                    file=sys.stderr,
+                )
+                continue
+            pattern_str, template = line.split("=", 1)
+            pattern_str = pattern_str.strip()
+            template = template.strip()
+            if not pattern_str or not template:
+                continue
+            try:
+                patterns.append((re.compile(pattern_str), template))
+            except re.error as e:
+                print(
+                    f"hypr-session-restore: {path}:{line_no}: invalid regex: {e}",
+                    file=sys.stderr,
+                )
+    return patterns
+
+
+def class_relaunch_command(cls, patterns, cwd):
+    """Return a command derived from the window class if a mapping matches."""
+    for pattern, template in patterns:
+        m = pattern.search(cls)
+        if m:
+            try:
+                return template.format(cwd=cwd, **m.groupdict())
+            except (KeyError, IndexError) as e:
+                print(
+                    f"hypr-session-restore: class-cmd template error for {cls!r}: {e}",
+                    file=sys.stderr,
+                )
+                return None
+    return None
+
+
 def relaunch_command(client):
-    """Build the shell command that recreates this window's process."""
+    """Build the shell command that recreates this window's process.
+
+    This function handles terminals and generic apps. Class-to-command
+    mappings are applied by the caller before calling this function.
+    """
     pid = client["pid"]
     cls = client.get("class", "")
 
@@ -147,20 +222,45 @@ def relaunch_command(client):
 
 def save():
     clients = hyprctl_json("clients")
+    patterns = load_class_cmd_patterns()
     windows = []
     spawned_pids = set()
+    spawned_classes = set()
     for c in clients:
         if not c.get("mapped") or c.get("pid", -1) <= 0:
             continue
         # windows with no class are invisible helpers (e.g. tray bridges)
         if not c.get("class") or c["class"] in EXCLUDE_CLASSES:
             continue
-        cmd = relaunch_command(c)
+        cls = c.get("class", "")
+        pid = c["pid"]
+        cwd = proc_cwd(pid) or os.path.expanduser("~")
+
+        # User-defined class-to-command mappings take precedence.
+        class_cmd = class_relaunch_command(cls, patterns, cwd)
+        if class_cmd:
+            cmd = class_cmd
+        else:
+            cmd = relaunch_command(c)
         if not cmd:
             continue
-        pid = c["pid"]
+
+        # Decide whether to relaunch this window or let the sweep pass place it.
+        # SPAWN_ALL_CLASSES (e.g. ghostty) get one spawn per saved window because
+        # each invocation creates a new window. Classes with a custom class-cmd
+        # mapping spawn once per class; the command is expected to restore or
+        # create the remaining windows. Regular apps get one spawn per process.
+        if cls in SPAWN_ALL_CLASSES:
+            spawn = True
+        elif class_cmd:
+            spawn = cls not in spawned_classes
+            spawned_classes.add(cls)
+        else:
+            spawn = pid not in spawned_pids
+            spawned_pids.add(pid)
+
         windows.append({
-            "class": c.get("class", ""),
+            "class": cls,
             "title": c.get("title", ""),
             "workspace": c["workspace"],
             "at": c["at"],
@@ -170,11 +270,8 @@ def save():
             "fullscreen": c.get("fullscreen", 0),
             "monitor": c.get("monitor", 0),
             "cmd": cmd,
-            # one relaunch per process; extra windows of the same pid are
-            # placed by the sweep pass (single-instance apps reopen them)
-            "spawn": pid not in spawned_pids,
+            "spawn": spawn,
         })
-        spawned_pids.add(pid)
 
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = SESSION_FILE + ".tmp"
