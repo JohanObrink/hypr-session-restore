@@ -33,6 +33,12 @@ DISABLE_FLAG = os.path.join(STATE_DIR, "disabled")
 EXCLUDE_CLASSES = {
     "org.quickshell",
     "xembedsniproxy",
+    # User UI chrome
+    "se.johan.confirm",
+    "se.johan.logout-progress",
+    "waybar",
+    "walker",
+    "wlogout",
 }
 EXCLUDE_CLASSES |= {
     c.strip() for c in os.environ.get("HYPR_SESSION_EXCLUDE", "").split(",") if c.strip()
