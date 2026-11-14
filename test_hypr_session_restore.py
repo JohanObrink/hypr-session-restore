@@ -89,17 +89,21 @@ class TestSaveSpawnLogic(unittest.TestCase):
 
     def test_ghostty_spawns_every_window(self):
         """Ghostty is single-instance multi-window: each window spawns with +new-window."""
-        clients = [
-            _client("com.mitchellh.ghostty", 200, ws_id=1),
-            _client("com.mitchellh.ghostty", 200, ws_id=2),
-            _client("com.mitchellh.ghostty", 200, ws_id=3),
-        ]
-        count = self._run_save(clients)
-        self.assertEqual(count, 3)
-        windows = self._load_windows()
-        self.assertTrue(all(w["spawn"] for w in windows))
-        for w in windows:
-            self.assertEqual(w["cmd"], "ghostty --working-directory=/home +new-window")
+        class_cmd_file = os.path.join(self.tmpdir.name, "class-cmd.conf")
+        with open(class_cmd_file, "w") as f:
+            f.write("com.mitchellh.ghostty = ghostty --working-directory={cwd} +new-window\n")
+        with patch.object(hsr, "CLASS_CMD_FILE", class_cmd_file):
+            clients = [
+                _client("com.mitchellh.ghostty", 200, ws_id=1),
+                _client("com.mitchellh.ghostty", 200, ws_id=2),
+                _client("com.mitchellh.ghostty", 200, ws_id=3),
+            ]
+            count = self._run_save(clients)
+            self.assertEqual(count, 3)
+            windows = self._load_windows()
+            self.assertTrue(all(w["spawn"] for w in windows))
+            for w in windows:
+                self.assertEqual(w["cmd"], "ghostty --working-directory=/home +new-window")
 
     def test_chromium_spawns_once(self):
         """Chromium is single-instance self-restoring: only one spawn."""
@@ -179,12 +183,17 @@ class TestClassCmdHelpers(unittest.TestCase):
 
     def test_class_relaunch_command_substitutes_groups(self):
         patterns = [(hsr.re.compile(r"chrome-(?P<domain>[^_]+)__"), "app https://{domain}/")]
-        cmd = hsr.class_relaunch_command("chrome-example.com__-Profile_1", patterns)
+        cmd = hsr.class_relaunch_command("chrome-example.com__-Profile_1", patterns, "/tmp")
         self.assertEqual(cmd, "app https://example.com/")
+
+    def test_class_relaunch_command_substitutes_cwd(self):
+        patterns = [(hsr.re.compile(r"ghostty"), "ghostty --working-directory={cwd} +new-window")]
+        cmd = hsr.class_relaunch_command("ghostty", patterns, "/tmp")
+        self.assertEqual(cmd, "ghostty --working-directory=/tmp +new-window")
 
     def test_class_relaunch_command_no_match_returns_none(self):
         patterns = [(hsr.re.compile(r"foo-(?P<x>\d+)"), "bar {x}")]
-        self.assertIsNone(hsr.class_relaunch_command("baz", patterns))
+        self.assertIsNone(hsr.class_relaunch_command("baz", patterns, "/tmp"))
 
 
 if __name__ == "__main__":

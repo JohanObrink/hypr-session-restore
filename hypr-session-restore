@@ -58,35 +58,16 @@ TERMINALS = {
     "kitty": ("kitty", "-d", None),
     "foot": ("foot", "-D", None),
     "Alacritty": ("alacritty", "--working-directory", "-e"),
-    "com.mitchellh.ghostty": ("ghostty", "--working-directory", "-e"),
 }
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
 
-# Single-instance terminals: all windows share one process, so launching the
-# command again may focus an existing window instead of creating a new one.
-# Use an explicit "new window" action. Per-window TUI state cannot be restored
-# because all windows share a process tree.
-# class -> (binary, cwd_flag, new_window_action)
-SINGLE_INSTANCE_TERMINALS = {
-    "com.mitchellh.ghostty": ("ghostty", "--working-directory", "+new-window"),
-}
-
-# Apps where every window belongs to a single process, but launching the
-# command again creates a new window in the same instance.
-SINGLE_INSTANCE_MULTI_WINDOW = {
+# Apps where every window belongs to a single process, but each invocation of
+# the command creates a new window in the same instance. For these classes we
+# relaunch once per saved window. Other single-instance apps are handled via
+# class-cmd.conf (spawn once per class).
+SPAWN_ALL_CLASSES = {
     "com.mitchellh.ghostty",
-}
-
-# Apps where every window belongs to a single process and the application
-# restores its own windows. We spawn the command once and let the sweep pass
-# place the restored windows.
-SINGLE_INSTANCE_SELF_RESTORE = {
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "google-chrome-stable",
-    "firefox",
 }
 
 SAVE_INTERVAL = 60
@@ -192,13 +173,13 @@ def load_class_cmd_patterns():
     return patterns
 
 
-def class_relaunch_command(cls, patterns):
+def class_relaunch_command(cls, patterns, cwd):
     """Return a command derived from the window class if a mapping matches."""
     for pattern, template in patterns:
         m = pattern.search(cls)
         if m:
             try:
-                return template.format(**m.groupdict())
+                return template.format(cwd=cwd, **m.groupdict())
             except (KeyError, IndexError) as e:
                 print(
                     f"hypr-session-restore: class-cmd template error for {cls!r}: {e}",
@@ -215,19 +196,12 @@ def relaunch_command(client, patterns=None):
 
     pid = client["pid"]
     cls = client.get("class", "")
+    cwd = proc_cwd(pid) or os.path.expanduser("~")
 
     # User-defined class-to-command mappings take precedence.
-    cmd = class_relaunch_command(cls, patterns)
+    cmd = class_relaunch_command(cls, patterns, cwd)
     if cmd:
         return cmd
-
-    if cls in SINGLE_INSTANCE_TERMINALS:
-        binary, cwd_flag, new_window_action = SINGLE_INSTANCE_TERMINALS[cls]
-        # All windows share a process tree, so we cannot reliably associate a
-        # specific TUI or shell cwd with each window. Open a new window in the
-        # best-effort cwd of the main process.
-        cwd = proc_cwd(pid) or os.path.expanduser("~")
-        return shlex.join([binary, f"{cwd_flag}={cwd}", new_window_action])
 
     if cls in TERMINALS:
         binary, cwd_flag, exec_flag = TERMINALS[cls]
@@ -268,19 +242,16 @@ def save():
             continue
         cls = c.get("class", "")
         pid = c["pid"]
-        # Classes with a user-defined relaunch command are treated like other
-        # single-instance self-restoring apps: spawn once and let the sweep pass
-        # place any additional windows.
-        has_class_cmd = class_relaunch_command(cls, patterns) is not None
+        has_class_cmd = class_relaunch_command(cls, patterns, proc_cwd(pid) or "") is not None
 
         # Decide whether to relaunch this window or let the sweep pass place it.
-        # Single-instance multi-window apps (e.g. ghostty) get one spawn per
-        # saved window. Single-instance self-restoring apps (e.g. chromium,
-        # firefox, Chrome PWAs) get one spawn total; the app restores its own
-        # windows. Regular apps get one spawn per process.
-        if cls in SINGLE_INSTANCE_MULTI_WINDOW:
+        # SPAWN_ALL_CLASSES (e.g. ghostty) get one spawn per saved window because
+        # each invocation creates a new window. Classes with a custom class-cmd
+        # mapping spawn once per class; the command is expected to restore or
+        # create the remaining windows. Regular apps get one spawn per process.
+        if cls in SPAWN_ALL_CLASSES:
             spawn = True
-        elif cls in SINGLE_INSTANCE_SELF_RESTORE or has_class_cmd:
+        elif has_class_cmd:
             spawn = cls not in spawned_self_restore
             spawned_self_restore.add(cls)
         else:
