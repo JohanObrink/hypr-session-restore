@@ -56,6 +56,23 @@ TERMINALS = {
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
 
+# Apps where every window belongs to a single process, but launching the
+# command again creates a new window in the same instance.
+SINGLE_INSTANCE_MULTI_WINDOW = {
+    "ghostty",
+}
+
+# Apps where every window belongs to a single process and the application
+# restores its own windows. We spawn the command once and let the sweep pass
+# place the restored windows.
+SINGLE_INSTANCE_SELF_RESTORE = {
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "firefox",
+}
+
 SAVE_INTERVAL = 60
 DAEMON_INITIAL_DELAY = 90
 SWEEP_TIMEOUT = 20
@@ -156,6 +173,7 @@ def save():
     clients = hyprctl_json("clients")
     windows = []
     spawned_pids = set()
+    spawned_self_restore = set()
     for c in clients:
         if not c.get("mapped") or c.get("pid", -1) <= 0:
             continue
@@ -165,9 +183,25 @@ def save():
         cmd = relaunch_command(c)
         if not cmd:
             continue
+        cls = c.get("class", "")
         pid = c["pid"]
+
+        # Decide whether to relaunch this window or let the sweep pass place it.
+        # Single-instance multi-window apps (e.g. ghostty) get one spawn per
+        # saved window. Single-instance self-restoring apps (e.g. chromium,
+        # firefox) get one spawn total; the app restores its own windows.
+        # Regular apps get one spawn per process.
+        if cls in SINGLE_INSTANCE_MULTI_WINDOW:
+            spawn = True
+        elif cls in SINGLE_INSTANCE_SELF_RESTORE:
+            spawn = cls not in spawned_self_restore
+            spawned_self_restore.add(cls)
+        else:
+            spawn = pid not in spawned_pids
+            spawned_pids.add(pid)
+
         windows.append({
-            "class": c.get("class", ""),
+            "class": cls,
             "title": c.get("title", ""),
             "workspace": c["workspace"],
             "at": c["at"],
@@ -177,11 +211,8 @@ def save():
             "fullscreen": c.get("fullscreen", 0),
             "monitor": c.get("monitor", 0),
             "cmd": cmd,
-            # one relaunch per process; extra windows of the same pid are
-            # placed by the sweep pass (single-instance apps reopen them)
-            "spawn": pid not in spawned_pids,
+            "spawn": spawn,
         })
-        spawned_pids.add(pid)
 
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = SESSION_FILE + ".tmp"
