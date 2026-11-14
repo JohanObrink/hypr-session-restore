@@ -4,6 +4,7 @@
 Run with: python3 -m unittest test_hypr_session_restore
 """
 
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -115,13 +116,73 @@ class TestSaveSpawnLogic(unittest.TestCase):
     def test_excluded_classes_are_skipped(self):
         """Windows in EXCLUDE_CLASSES are not saved."""
         clients = [
-            _client("waybar", 400),
+            _client("org.quickshell", 400),
             _client("myapp", 401),
         ]
         count = self._run_save(clients)
         self.assertEqual(count, 1)
         windows = self._load_windows()
         self.assertEqual(windows[0]["class"], "myapp")
+
+    def test_class_cmd_mapping_rewrites_command(self):
+        """User-defined class-to-command mappings rewrite the relaunch cmd."""
+        class_cmd_file = os.path.join(self.tmpdir.name, "class-cmd.conf")
+        with open(class_cmd_file, "w") as f:
+            f.write(r"chrome-(?P<domain>[^_]+)__-Profile_\d+ = app --url=https://{domain}/" + "\n")
+        with patch.object(hsr, "CLASS_CMD_FILE", class_cmd_file):
+            clients = [_client("chrome-example.com__-Profile_1", 500, ws_id=2)]
+            count = self._run_save(clients)
+            self.assertEqual(count, 1)
+            windows = self._load_windows()
+            self.assertEqual(windows[0]["cmd"], "app --url=https://example.com/")
+            self.assertTrue(windows[0]["spawn"])
+
+    def test_class_cmd_classes_spawn_once(self):
+        """Classes with a class-cmd mapping spawn once per unique class."""
+        class_cmd_file = os.path.join(self.tmpdir.name, "class-cmd.conf")
+        with open(class_cmd_file, "w") as f:
+            f.write(r"chrome-(?P<domain>[^_]+)__-Profile_\d+ = app --url=https://{domain}/" + "\n")
+        with patch.object(hsr, "CLASS_CMD_FILE", class_cmd_file):
+            clients = [
+                _client("chrome-a.com__-Profile_1", 600, ws_id=1),
+                _client("chrome-a.com__-Profile_1", 600, ws_id=2),
+                _client("chrome-b.com__-Profile_1", 600, ws_id=3),
+            ]
+            count = self._run_save(clients)
+            self.assertEqual(count, 3)
+            windows = self._load_windows()
+            spawns = [w["spawn"] for w in windows]
+            self.assertEqual(spawns.count(True), 2)
+            self.assertEqual(spawns.count(False), 1)
+
+
+class TestClassCmdHelpers(unittest.TestCase):
+    """Tests for class-cmd.conf parsing and command generation."""
+
+    def test_load_class_cmd_patterns_parses_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as f:
+            f.write("# comment\n")
+            f.write("foo-(?P<x>\\d+) = bar {x}\n")
+            f.write("bad line with no equals\n")
+            path = f.name
+        try:
+            with patch.object(hsr, "CLASS_CMD_FILE", path):
+                patterns = hsr.load_class_cmd_patterns()
+            self.assertEqual(len(patterns), 1)
+            pattern, template = patterns[0]
+            self.assertEqual(pattern.pattern, r"foo-(?P<x>\d+)")
+            self.assertEqual(template, "bar {x}")
+        finally:
+            os.unlink(path)
+
+    def test_class_relaunch_command_substitutes_groups(self):
+        patterns = [(hsr.re.compile(r"chrome-(?P<domain>[^_]+)__"), "app https://{domain}/")]
+        cmd = hsr.class_relaunch_command("chrome-example.com__-Profile_1", patterns)
+        self.assertEqual(cmd, "app https://example.com/")
+
+    def test_class_relaunch_command_no_match_returns_none(self):
+        patterns = [(hsr.re.compile(r"foo-(?P<x>\d+)"), "bar {x}")]
+        self.assertIsNone(hsr.class_relaunch_command("baz", patterns))
 
 
 if __name__ == "__main__":
