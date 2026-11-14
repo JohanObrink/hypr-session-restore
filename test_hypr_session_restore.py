@@ -88,16 +88,18 @@ class TestSaveSpawnLogic(unittest.TestCase):
         self.assertFalse(windows[1]["spawn"])
 
     def test_ghostty_spawns_every_window(self):
-        """Ghostty is single-instance multi-window: each window spawns."""
+        """Ghostty is single-instance multi-window: each window spawns with +new-window."""
         clients = [
-            _client("ghostty", 200, ws_id=1),
-            _client("ghostty", 200, ws_id=2),
-            _client("ghostty", 200, ws_id=3),
+            _client("com.mitchellh.ghostty", 200, ws_id=1),
+            _client("com.mitchellh.ghostty", 200, ws_id=2),
+            _client("com.mitchellh.ghostty", 200, ws_id=3),
         ]
         count = self._run_save(clients)
         self.assertEqual(count, 3)
         windows = self._load_windows()
         self.assertTrue(all(w["spawn"] for w in windows))
+        for w in windows:
+            self.assertEqual(w["cmd"], "ghostty --working-directory=/home +new-window")
 
     def test_chromium_spawns_once(self):
         """Chromium is single-instance self-restoring: only one spawn."""

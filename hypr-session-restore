@@ -58,15 +58,24 @@ TERMINALS = {
     "kitty": ("kitty", "-d", None),
     "foot": ("foot", "-D", None),
     "Alacritty": ("alacritty", "--working-directory", "-e"),
-    "ghostty": ("ghostty", "--working-directory", "-e"),
+    "com.mitchellh.ghostty": ("ghostty", "--working-directory", "-e"),
 }
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
 
+# Single-instance terminals: all windows share one process, so launching the
+# command again may focus an existing window instead of creating a new one.
+# Use an explicit "new window" action. Per-window TUI state cannot be restored
+# because all windows share a process tree.
+# class -> (binary, cwd_flag, new_window_action)
+SINGLE_INSTANCE_TERMINALS = {
+    "com.mitchellh.ghostty": ("ghostty", "--working-directory", "+new-window"),
+}
+
 # Apps where every window belongs to a single process, but launching the
 # command again creates a new window in the same instance.
 SINGLE_INSTANCE_MULTI_WINDOW = {
-    "ghostty",
+    "com.mitchellh.ghostty",
 }
 
 # Apps where every window belongs to a single process and the application
@@ -211,6 +220,14 @@ def relaunch_command(client, patterns=None):
     cmd = class_relaunch_command(cls, patterns)
     if cmd:
         return cmd
+
+    if cls in SINGLE_INSTANCE_TERMINALS:
+        binary, cwd_flag, new_window_action = SINGLE_INSTANCE_TERMINALS[cls]
+        # All windows share a process tree, so we cannot reliably associate a
+        # specific TUI or shell cwd with each window. Open a new window in the
+        # best-effort cwd of the main process.
+        cwd = proc_cwd(pid) or os.path.expanduser("~")
+        return shlex.join([binary, f"{cwd_flag}={cwd}", new_window_action])
 
     if cls in TERMINALS:
         binary, cwd_flag, exec_flag = TERMINALS[cls]
