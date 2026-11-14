@@ -154,7 +154,7 @@ def load_class_cmd_patterns():
                 continue
             if "=" not in line:
                 print(
-                    f"hypr-session-restore: {CLASS_CMD_FILE}:{line_no}: missing '='",
+                    f"hypr-session-restore: {path}:{line_no}: missing '='",
                     file=sys.stderr,
                 )
                 continue
@@ -167,7 +167,7 @@ def load_class_cmd_patterns():
                 patterns.append((re.compile(pattern_str), template))
             except re.error as e:
                 print(
-                    f"hypr-session-restore: {CLASS_CMD_FILE}:{line_no}: invalid regex: {e}",
+                    f"hypr-session-restore: {path}:{line_no}: invalid regex: {e}",
                     file=sys.stderr,
                 )
     return patterns
@@ -189,19 +189,14 @@ def class_relaunch_command(cls, patterns, cwd):
     return None
 
 
-def relaunch_command(client, patterns=None):
-    """Build the shell command that recreates this window's process."""
-    if patterns is None:
-        patterns = load_class_cmd_patterns()
+def relaunch_command(client):
+    """Build the shell command that recreates this window's process.
 
+    This function handles terminals and generic apps. Class-to-command
+    mappings are applied by the caller before calling this function.
+    """
     pid = client["pid"]
     cls = client.get("class", "")
-    cwd = proc_cwd(pid) or os.path.expanduser("~")
-
-    # User-defined class-to-command mappings take precedence.
-    cmd = class_relaunch_command(cls, patterns, cwd)
-    if cmd:
-        return cmd
 
     if cls in TERMINALS:
         binary, cwd_flag, exec_flag = TERMINALS[cls]
@@ -230,19 +225,25 @@ def save():
     patterns = load_class_cmd_patterns()
     windows = []
     spawned_pids = set()
-    spawned_self_restore = set()
+    spawned_classes = set()
     for c in clients:
         if not c.get("mapped") or c.get("pid", -1) <= 0:
             continue
         # windows with no class are invisible helpers (e.g. tray bridges)
         if not c.get("class") or c["class"] in EXCLUDE_CLASSES:
             continue
-        cmd = relaunch_command(c, patterns)
-        if not cmd:
-            continue
         cls = c.get("class", "")
         pid = c["pid"]
-        has_class_cmd = class_relaunch_command(cls, patterns, proc_cwd(pid) or "") is not None
+        cwd = proc_cwd(pid) or os.path.expanduser("~")
+
+        # User-defined class-to-command mappings take precedence.
+        class_cmd = class_relaunch_command(cls, patterns, cwd)
+        if class_cmd:
+            cmd = class_cmd
+        else:
+            cmd = relaunch_command(c)
+        if not cmd:
+            continue
 
         # Decide whether to relaunch this window or let the sweep pass place it.
         # SPAWN_ALL_CLASSES (e.g. ghostty) get one spawn per saved window because
@@ -251,9 +252,9 @@ def save():
         # create the remaining windows. Regular apps get one spawn per process.
         if cls in SPAWN_ALL_CLASSES:
             spawn = True
-        elif has_class_cmd:
-            spawn = cls not in spawned_self_restore
-            spawned_self_restore.add(cls)
+        elif class_cmd:
+            spawn = cls not in spawned_classes
+            spawned_classes.add(cls)
         else:
             spawn = pid not in spawned_pids
             spawned_pids.add(pid)
