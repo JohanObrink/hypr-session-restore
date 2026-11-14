@@ -42,6 +42,32 @@ walks the terminal's process tree instead:
 Supported terminals: **kitty**, **foot**, **alacritty** (trivial to extend —
 see `TERMINALS` at the top of the script).
 
+### Single-instance apps and PWAs
+
+Some apps run as a single process with multiple windows (e.g. Ghostty, Chromium
+PWAs). The command recovered from `/proc/<pid>/cmdline` is often the bare
+binary and cannot recreate a specific window.
+
+For these cases, create `~/.config/hypr-session-restore/class-cmd.conf` and
+map window classes to the exact relaunch command:
+
+```conf
+# pattern = command-template
+# {cwd}      best-effort working directory of the window process
+# {name}     any Python regex named group
+
+# Ghostty is single-instance; open a new window explicitly.
+com.mitchellh.ghostty = ghostty --working-directory={cwd} +new-window
+
+# Chrome/Chromium PWAs encode the app URL in their class name.
+chrome-(?P<domain>[^_]+)__-Profile_\\d+ = chromium --app=https://{domain}/
+```
+
+Classes matched by `class-cmd.conf` are spawned once per unique class; the
+sweep pass places any additional windows the app creates. Classes listed in
+the in-script `SPAWN_ALL_CLASSES` set (e.g. Ghostty) are spawned once per
+saved window because each invocation creates a new window.
+
 ### Apps restore their own state
 
 The script reopens windows; content restoration rides on each app's own
@@ -68,6 +94,10 @@ Honesty section. These are compositor/protocol limits, not bugs:
   protocol, which apps don't implement yet.
 - Multiple same-class windows from one single-instance process are matched
   best-effort by the sweep pass.
+- **Single-instance terminal TUI state**: terminals like Ghostty share one
+  process across all windows, so the script cannot associate a specific TUI
+  (nvim, lazygit, etc.) with a specific window. Windows are restored; the
+  commands inside them are not.
 - Apps launched purely via D-Bus activation (meaningless cmdline) may not
   relaunch. Rare.
 
